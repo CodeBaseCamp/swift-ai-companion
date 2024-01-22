@@ -11,33 +11,30 @@ extension Companion {
     using _: Coeffects
   ) -> [Any] {
     let observers = [
-      Self.permanentChangeObserver(savingChangesUsing: model) { closure in
-        logicModule.perform(.switchToDispatchQueue(.backgroundThread(.defaultInstance))) { _ in
-          closure()
-        }
-      },
+      Self.permanentChangeObserver(savingChangesUsing: model),
     ]
 
-    observers.forEach {
-      logicModule.add($0.0)
+    Task {
+      for tuple in observers {
+        await logicModule.add(tuple.0)
+      }
     }
 
     return observers.map(\.1)
   }
 
   private static func permanentChangeObserver(
-    savingChangesUsing model: Model,
-    performInBackground: @escaping (@escaping () -> Void) -> Void
+    savingChangesUsing model: Model
   ) -> (ModelObserver<AppState>, Any) {
     let observer = PropertyPathObserver.observer(
       for: \AppState.self,
       initiallyObservedValue: { _ in }
     ) { change in
-      guard change.current.updateKind == .permanent else {
-        return
-      }
+      Task {
+        guard change.current.updateKind == .permanent else {
+          return
+        }
 
-      performInBackground {
         let previousData = try! change.previous.data()
         let currentData = try! change.current.data()
 

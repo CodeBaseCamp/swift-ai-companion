@@ -5,39 +5,41 @@ import ART
 import Foundation
 import SwiftUI
 
-class SideEffectPerformer: SideEffectPerformerProtocol {
-  typealias Error = Companion.Error
+actor SideEffectPerformer: TaskBasedSideEffectPerformerProtocol {
+  typealias Result<Error: ErrorProtocol> =
+    CompletionIndication<CompositeError<SideEffectExecutionError<Error>>>
+  typealias SideEffectClosure = (SideEffect, Coeffects) async -> Result<SideEffectError>
 
   /// Internally used side effect performer.
-  private let sideEffectPerformer: ART.SideEffectPerformer<
+  private let sideEffectPerformer: ART.TaskBasedSideEffectPerformer<
     SideEffect,
-    Error,
-    Coeffects,
-    BackgroundDispatchQueueID
+    SideEffectError,
+    Coeffects
   >
 
-  init(
-    dispatchQueues: [DispatchQueueID<BackgroundDispatchQueueID>: DispatchQueue] = .default,
-    sideEffectClosure: @escaping SideEffectClosure
-  ) {
-    self.sideEffectPerformer = .init(
-      dispatchQueues: dispatchQueues,
-      sideEffectClosure: sideEffectClosure
-    )
+  init(sideEffectClosure: @escaping SideEffectClosure) {
+    self.sideEffectPerformer = .init(sideEffectClosure: sideEffectClosure)
   }
 
   func perform(
     _ sideEffect: Companion.CompositeSideEffect,
-    using coeffects: Coeffects,
-    completion: @escaping CompletionClosure
-  ) {
-    self.sideEffectPerformer.perform(sideEffect, using: coeffects, completion: completion)
+    using coeffects: Coeffects
+  ) async -> Result<SideEffectError> {
+    await self.sideEffectPerformer.perform(sideEffect, using: coeffects)
+  }
+
+  func task(
+    performing sideEffect: Companion.CompositeSideEffect,
+    using coeffects: Coeffects
+  ) async -> Task<Result<SideEffectError>, Swift.Error> {
+    return Task { [unowned self] in
+      return await self.perform(sideEffect, using: coeffects)
+    }
   }
 }
 
 extension SideEffectPerformer {
-  typealias URLRequestHandlingClosure =
-    (URLRequest, @escaping @Sendable (Data?, URLResponse?, Swift.Error?) -> Void) -> Void
+  typealias URLRequestHandlingClosure = (URLRequest) async throws -> (Data, URLResponse)
 
   struct OpenAiRequest<T: Decodable> {
     var apiKey: String
@@ -50,12 +52,12 @@ extension SideEffectPerformer {
 
   static func newDefaultInstance(
     handleUrlRequest: @escaping URLRequestHandlingClosure =
-      { URLSession.shared.dataTask(with: $0, completionHandler: $1).resume() },
+      { try await URLSession.shared.data(for: $0) },
     imageDownloadClosure: @escaping (URL) async -> (Data, URLResponse)? =
       { try? await URLSession.shared.data(from: $0) },
     handle: @escaping (Request) -> Void
   ) -> SideEffectPerformer {
-    return .init(dispatchQueues: .default) { sideEffect, coeffects, completion in
+    return .init() { sideEffect, coeffects in
       switch sideEffect {
       case let .textGeneration(prompt, api, entryID):
         switch api {
@@ -78,18 +80,16 @@ extension SideEffectPerformer {
             ]
           )
 
-          Self.handleOpenAiRequest(
-            request,
-            handleUrlRequest: handleUrlRequest,
-            errorClosure: { completion(.failure($0)) }
-          ) { response in
+          switch await Self.handleOpenAiRequest(request, handleUrlRequest: handleUrlRequest) {
+          case let .failure(error):
+            return .failure(.simpleError(.customError(.urlSessionDataTask(error))))
+          case let .success(response):
             guard !response.choices.isEmpty else {
-              completion(.failure(.invalidChatResponse))
-              return
+              return .failure(.simpleError(.customError(.urlSessionDataTask(.invalidChatResponse))))
             }
 
             handle(.finalizingOfEntry(withID: entryID, .text(response.choices[0].message.content)))
-            completion(.success)
+            return .success
           }
         }
       case let .imageGeneration(prompt, dimension, api, entryID):
@@ -108,36 +108,39 @@ extension SideEffectPerformer {
             ]
           )
           
-          Self.handleOpenAiRequest(
+          let response = await Self.handleOpenAiRequest(
             request,
-            handleUrlRequest: handleUrlRequest,
-            errorClosure: { completion(.failure($0)) }
-          ) { response in
-            Task {
-              let optionalImages = await withTaskGroup(of: UIImage?.self) { taskGroup in
-                let urls = response.data.compactMap { URL(string: $0.url) }
-                urls.forEach { url in
-                  taskGroup.addTask {
-                    guard let (data, _) = await imageDownloadClosure(url) else {
-                      return nil
-                    }
-                    return UIImage(data: data)
+            handleUrlRequest: handleUrlRequest
+          )
+
+          switch response {
+          case let .failure(error):
+            return .failure(.simpleError(.customError(.urlSessionDataTask(error))))
+          case let .success(response):
+            let optionalImages = await withTaskGroup(of: UIImage?.self) { taskGroup in
+              let urls = response.data.compactMap { URL(string: $0.url) }
+              urls.forEach { url in
+                taskGroup.addTask {
+                  guard let (data, _) = await imageDownloadClosure(url) else {
+                    return nil
                   }
+                  return UIImage(data: data)
                 }
-                
-                var images = [UIImage?]()
-                for await result in taskGroup {
-                  images.append(result)
-                }
-                return images
               }
-              let images = optionalImages.compactMap { $0 }
-              
-              handle(
-                .finalizingOfEntry(withID: entryID, images.isEmpty ? .failure : .images(images))
-              )
-              completion(.success)
+
+              var images = [UIImage?]()
+              for await result in taskGroup {
+                images.append(result)
+              }
+              return images
             }
+            let images = optionalImages.compactMap { $0 }
+
+            handle(
+              .finalizingOfEntry(withID: entryID, images.isEmpty ? .failure : .images(images))
+            )
+
+            return .success
           }
         }
       }
@@ -146,84 +149,68 @@ extension SideEffectPerformer {
 
   private static func handleOpenAiRequest<T: Decodable>(
     _ request: OpenAiRequest<T>,
-    handleUrlRequest: @escaping URLRequestHandlingClosure,
-    errorClosure: @escaping (URLSessionDataTaskError) -> Void,
-    completion: @escaping (T) -> Void
-  ) {
-    Self.handle(
+    handleUrlRequest: @escaping URLRequestHandlingClosure
+  ) async -> Swift.Result<T, URLSessionDataTaskError> {
+    let result = await Self.handle(
       .postRequest(
         .openAiModerationsURL,
         apiKey: request.apiKey,
         jsonObject: ["input": request.prompt]
       ),
       handleUrlRequest: handleUrlRequest
-    ) {
-      switch $0 {
+    )
+
+    switch result {
+    case let .failure(error):
+      return .failure(error)
+    case let .success(data):
+      guard
+        let response = try? JSONDecoder().decode(OpenAiModerationResponse.self, from: data),
+        !response.results.isEmpty
+      else {
+        return .failure(.moderationResponseExtraction)
+      }
+
+      guard !response.results[0].flagged else {
+        return .failure(.flaggedPrompt)
+      }
+
+      let result = await Self.handle(
+        .postRequest(request.apiURL, apiKey: request.apiKey, jsonObject: request.jsonObject),
+        handleUrlRequest: handleUrlRequest
+      )
+
+      switch result {
       case let .failure(error):
-        errorClosure(error)
-        return
+        return .failure(error)
       case let .success(data):
-        guard
-          let response = try? JSONDecoder().decode(OpenAiModerationResponse.self, from: data),
-          !response.results.isEmpty
+        guard let response = try? JSONDecoder().decode(request.responseType, from: data)
         else {
-          errorClosure(.moderationResponseExtraction)
-          return
+          return .failure(request.responseExtractionError)
         }
 
-        guard !response.results[0].flagged else {
-          errorClosure(.flaggedPrompt)
-          return
-        }
-
-        Self.handle(
-          .postRequest(request.apiURL, apiKey: request.apiKey, jsonObject: request.jsonObject),
-          handleUrlRequest: handleUrlRequest
-        ) {
-          switch $0 {
-          case let .failure(error):
-            errorClosure(error)
-            return
-          case let .success(data):
-            guard let response = try? JSONDecoder().decode(request.responseType, from: data)
-            else {
-              errorClosure(request.responseExtractionError)
-              return
-            }
-
-            completion(response)
-          }
-        }
+        return .success(response)
       }
     }
   }
 
   private static func handle(
     _ request: URLRequest,
-    handleUrlRequest: @escaping URLRequestHandlingClosure,
-    completion: @escaping (Result<Data, URLSessionDataTaskError>) -> Void
-  ) {
-    handleUrlRequest(request) { data, response, error in
-      if let error = error {
-        completion(.failure(.general(error.localizedDescription)))
-        return
-      }
+    handleUrlRequest: @escaping URLRequestHandlingClosure
+  ) async -> Swift.Result<Data, URLSessionDataTaskError> {
+    do {
+      let (data, response) = try await handleUrlRequest(request)
 
       guard
         let httpResponse = response as? HTTPURLResponse,
         (200...299).contains(httpResponse.statusCode)
       else {
-        completion(
-          .failure(.response((response as? HTTPURLResponse)?.statusCode ?? -1))
-        )
-        return
+        return .failure(.response((response as? HTTPURLResponse)?.statusCode ?? -1))
       }
 
-      guard let data = data else {
-        completion(.failure(.dataExtraction))
-        return
-      }
-      completion(.success(data))
+      return .success(data)
+    } catch let error {
+      return .failure(.general(error.localizedDescription))
     }
   }
 }
@@ -231,7 +218,6 @@ extension SideEffectPerformer {
 public enum URLSessionDataTaskError: ErrorProtocol {
   case general(String)
   case response(Int)
-  case dataExtraction
   case moderationResponseExtraction
   case flaggedPrompt
   case chatResponseExtraction
@@ -247,8 +233,6 @@ extension URLSessionDataTaskError: HumanReadable {
       return "general error: \(errorDescription)"
     case let .response(errorCode):
       return "response error: \(errorCode)"
-    case .dataExtraction:
-      return "data extraction error"
     case .moderationResponseExtraction:
       return "moderation response extraction error"
     case .flaggedPrompt:
@@ -263,14 +247,6 @@ extension URLSessionDataTaskError: HumanReadable {
       return "invalid image response error"
     }
   }
-}
-
-private extension Dictionary where Key == DispatchQueueID<BackgroundDispatchQueueID>,
-                                   Value == DispatchQueue {
-  static let `default`: Self = [
-    .mainThread: .main,
-    .backgroundThread(.defaultInstance): .global()
-  ]
 }
 
 extension CompletionIndication
@@ -295,7 +271,7 @@ extension SideEffectPerformer {
     let statusCode = shouldSucceed ? 200 : 0
 
     return .newDefaultInstance(
-      handleUrlRequest: { request, completionClosure in
+      handleUrlRequest: { request in
         let data: Data
         switch request.url {
         case URL.openAiModerationsURL:
@@ -308,15 +284,17 @@ extension SideEffectPerformer {
           fatalError("Unhandled URL: \(request.url?.absoluteString ?? "")")
         }
 
-        completionClosure(
+        return (
           data,
-          HTTPURLResponse(
-            url: requiredLet(request.url, "Should exist for request \(request)"),
-            statusCode: statusCode,
-            httpVersion: nil,
-            headerFields: nil
-          ),
-          nil
+          requiredLet(
+            HTTPURLResponse(
+              url: requiredLet(request.url, "Should exist for request \(request)"),
+              statusCode: statusCode,
+              httpVersion: nil,
+              headerFields: nil
+            ),
+            "Must be creatable"
+          )
         )
       },
       handle: handle

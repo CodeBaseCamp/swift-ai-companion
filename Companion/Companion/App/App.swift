@@ -22,7 +22,7 @@ final class App {
       try model.load(from: .standard, forKey: Companion.dataStorageKey)
     } catch {}
 
-    let logicModule = LogicModule(
+    let logicModule = TaskBasedLogicModule(
       model: model,
       sideEffectPerformer: sideEffectPerformer,
       coeffects: coeffects,
@@ -50,7 +50,9 @@ final class App {
     let logic = Companion.appViewLogic(logicModule)
 
     return (AppView.instance(observing: \.self, of: model, using: coeffects) { event in
-      logic.handle(event, given: model.state)
+      Task {
+        await logic.handle(event, given: model.state)
+      }
     }, logic)
   }
 }

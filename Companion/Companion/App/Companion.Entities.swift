@@ -4,10 +4,6 @@ import ART
 
 // MARK: Structs
 
-enum BackgroundDispatchQueueID: BackgroundDispatchQueueIDProtocol {
-  case defaultInstance
-}
-
 struct Coeffects: CoeffectsProtocol {
   let defaultCoeffects: DefaultCoeffectsProtocol = DefaultCoeffects()
 
@@ -21,14 +17,14 @@ struct Coeffects: CoeffectsProtocol {
 extension Companion {
   typealias Model = LogicModule.Model
   typealias CompositeSideEffect = 
-    ART.CompositeSideEffect<SideEffect, Error, BackgroundDispatchQueueID>
-  typealias Executable = ART.Executable<Request, SideEffect, Error, BackgroundDispatchQueueID>
-  typealias LogicModule = ART.LogicModule<
+    TaskBasedCompositeSideEffect<SideEffect, SideEffectError>
+  typealias Executable = TaskBasedExecutable<Request, SideEffect, Error>
+  typealias LogicModule = TaskBasedLogicModule<
     AppState,
     Request,
     SideEffectPerformer
   >
 
   typealias UILogic<ViewEvent: Equatable> =
-    UIEventLogicModule<ViewEvent, AppState, Request, SideEffectPerformer>
+    TaskBasedUIEventLogicModule<ViewEvent, AppState, Request, SideEffectPerformer>
 }

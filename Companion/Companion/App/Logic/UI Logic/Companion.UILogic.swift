@@ -50,8 +50,10 @@ extension Companion {
             }
 
             then.handle(.appendingOfEntry(entry))
-            then.perform(.only(sideEffect, on: .backgroundThread(.defaultInstance))) {
-              if $0.isFailure {
+
+            Task {
+              let result = await then.perform(sideEffect)
+              if result.isFailure {
                 then.handle(.finalizingOfEntry(withID: entry.id, .failure))
               }
             }
