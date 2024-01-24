@@ -22,7 +22,7 @@ final class App {
       try model.load(from: .standard, forKey: Companion.dataStorageKey)
     } catch {}
 
-    let logicModule = TaskBasedLogicModule(
+    let logicModule = LogicModule(
       model: model,
       sideEffectPerformer: sideEffectPerformer,
       coeffects: coeffects,

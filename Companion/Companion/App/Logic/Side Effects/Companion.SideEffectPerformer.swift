@@ -5,13 +5,13 @@ import ART
 import Foundation
 import SwiftUI
 
-actor SideEffectPerformer: TaskBasedSideEffectPerformerProtocol {
+actor SideEffectPerformer: SideEffectPerformerProtocol {
   typealias Result<Error: ErrorProtocol> =
     CompletionIndication<CompositeError<SideEffectExecutionError<Error>>>
   typealias SideEffectClosure = (SideEffect, Coeffects) async -> Result<SideEffectError>
 
   /// Internally used side effect performer.
-  private let sideEffectPerformer: ART.TaskBasedSideEffectPerformer<
+  private let sideEffectPerformer: ART.SideEffectPerformer<
     SideEffect,
     SideEffectError,
     Coeffects

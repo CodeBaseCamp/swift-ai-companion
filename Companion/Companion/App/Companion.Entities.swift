@@ -16,15 +16,14 @@ struct Coeffects: CoeffectsProtocol {
 
 extension Companion {
   typealias Model = LogicModule.Model
-  typealias CompositeSideEffect = 
-    TaskBasedCompositeSideEffect<SideEffect, SideEffectError>
-  typealias Executable = TaskBasedExecutable<Request, SideEffect, Error>
-  typealias LogicModule = TaskBasedLogicModule<
+  typealias CompositeSideEffect =  ART.CompositeSideEffect<SideEffect, SideEffectError>
+  typealias Executable = ART.Executable<Request, SideEffect, Error>
+  typealias LogicModule = ART.LogicModule<
     AppState,
     Request,
     SideEffectPerformer
   >
 
   typealias UILogic<ViewEvent: Equatable> =
-    TaskBasedUIEventLogicModule<ViewEvent, AppState, Request, SideEffectPerformer>
+    UIEventLogicModule<ViewEvent, AppState, Request, SideEffectPerformer>
 }
